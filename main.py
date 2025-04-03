@@ -38,7 +38,7 @@ try:
     print("📥 Downloading/loading model from Hugging Face Hub...")
     
     # Load tokenizer and model with quantization and GPU support
-    tokenizer = AutoTokenizer.from_pretrained(model_name, force_download=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, force_download=True, token=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_name, 
         device_map="auto",  # Auto-assign model layers between GPU & CPU
