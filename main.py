@@ -1,8 +1,12 @@
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-import torch
+import os
 import subprocess
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, BitsAndBytesConfig
+import torch
+
+# Set environment variable for better memory management
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -11,8 +15,8 @@ class CodeFile(BaseModel):
     path: str
     content: str
 
-# Force the model to run on CPU
-device = "cpu"
+# Check if CUDA is available
+device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"🚀 Model is running on: {'GPU' if device == 'cuda' else 'CPU'}")
 
 # Ensure git-lfs is installed
@@ -25,15 +29,22 @@ except Exception as e:
 # Define model name
 model_name = "microsoft/phi-2"
 
+# Quantization configuration to reduce GPU memory usage
+quantization_config = BitsAndBytesConfig(
+    load_in_8bit=True  # Use 8-bit quantization
+)
+
 try:
     print("📥 Downloading/loading model from Hugging Face Hub...")
     
-    # Load tokenizer and model from Hugging Face Hub
+    # Load tokenizer and model with quantization and GPU support
     tokenizer = AutoTokenizer.from_pretrained(model_name, force_download=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_name, 
-        device_map={"": "cpu"},
-        trust_remote_code=True
+        device_map="auto",  # Auto-assign model layers between GPU & CPU
+        trust_remote_code=True,
+        quantization_config=quantization_config,
+        offload_folder="offload"  # Directory for CPU offloading
     )
     
     print("✅ Model loaded successfully.")
@@ -45,38 +56,30 @@ except Exception as e:
 phi2_generator = pipeline("text-generation", model=model, tokenizer=tokenizer)
 
 def generate_documentation_for_code(code: str) -> str:
+    """Generates Markdown documentation for the provided code."""
     prompt = (
-        "You are a technical documentation expert skilled in multiple programming languages "
-        "and frameworks. Your task is to generate detailed and visually appealing Markdown documentation "
-        "for the given code. Follow these instructions:\n\n"
-        "1. **File Header:**\n"
-        "   - Start with a top-level header (using '#') that displays the file name (extracted from the code context).\n"
-        "   - On the next line, display the full file path in plain text.\n\n"
-        "2. **Documentation Sections:**\n"
-        "   - **Overview:** Provide a brief summary of the purpose of the code.\n"
-        "   - **Functions:** If there are any functions, list them with a short description of their behavior and parameters.\n"
-        "   - **Classes:** If there are classes, list them with a description of their purpose and key methods.\n"
-        "   - **Key Variables & Components:** List any important variables, constants, or modules used.\n"
-        "   - **Comments/Annotations:** Include any relevant comments that explain the logic.\n\n"
-        "3. **Formatting:**\n"
-        "   - Use proper Markdown formatting (headers, bullet points, code blocks) so that the documentation is "
-        "      clear, easy to read, and visually appealing.\n"
-        "   - Do not add any fabricated sections or details that are not present in the code.\n\n"
-        "4. **Generic and Accurate:**\n"
-        "   - The output should be generic enough to apply to code written in any programming language or framework.\n"
-        "   - Only document the code that is provided without inventing routes, endpoints, or features that do not exist.\n\n"
-        "Below is the code. Generate the documentation in Markdown format as described above.\n\n"
-        "Code:\n"
-        f"{code}\n\n"
-        "Documentation:"
+" You are a technical documentation expert. Your task is to analyze the given code and generate well-structured Markdown documentation. Follow these instructions:"
+"1. Overview: Summarize the purpose of the file concisely."
+"2. Functions & Methods: List all functions/methods along with a short explanation of their purpose."
+"3. Classes & Components: List any classes, their attributes, and their key methods."
+"4. Key Variables: Identify important variables/constants used in the file."
+"5. Comments & Annotations: Extract any relevant comments that clarify functionality."
+"7. If any of the above is not applicable for the given code simply skip that section"
+"Ensure the documentation follows proper Markdown syntax, with clear headers, bullet points, and code blocks where necessary."
+"Avoid unnecessary examples or exercises unless they exist in the original code. Do not fabricate details or assume functionality beyond what is provided."
+"Simply document the given code so that it is easy for a person to see and understand what is going on in the code"
+"Now analyze the following code and generate Markdown documentation:"
+"Code:"
+f"{code}"
     )
-    result = phi2_generator(prompt, max_new_tokens=300, do_sample=True, temperature=0.7)
+    result = phi2_generator(prompt, max_new_tokens=300, do_sample=True, temperature=0.8)
     generated_text = result[0]["generated_text"]
     documentation = generated_text.replace(prompt, "").strip()
     return documentation
 
 @app.post("/document")
-def document_codebase(code_files: list[CodeFile]):  # Now accepting a list directly
+def document_codebase(code_files: list[CodeFile]):  
+    """Processes multiple code files and generates documentation."""
     print(code_files)
     docs = {}
     for code_file in code_files:
@@ -88,6 +91,7 @@ def document_codebase(code_files: list[CodeFile]):  # Now accepting a list direc
             print(f"⚠️ Error processing {code_file.path}: {e}")
             docs[code_file.path] = f"Error generating documentation: {str(e)}"
 
+    # Format the Markdown documentation
     md_content = "# Codebase Documentation\n\n"
     for file_path, doc in docs.items():
         md_content += f"## {file_path}\n\n{doc}\n\n"
